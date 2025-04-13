@@ -1,0 +1,24 @@
+pip install matplotlib
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# CSVファイルのパス
+file_path = r"C:\Users\piani\OneDrive - Yokohama City University\Mystory\learning_data.csv"
+
+# データを読み込む
+data = pd.read_csv(file_path)
+
+# 読み込んだデータの確認
+print(data.head())  
+
+# 日付型に変換
+data["yyyymmdd"] = pd.to_datetime(data["yyyymmdd"])
+
+# 可視化
+plt.figure(figsize=(12, 6))
+sns.lineplot(x=data["yyyymmdd"], y=data["cancel_user"])
+plt.xticks(rotation=45)
+plt.title("Cancel User Trend Over Time")
+plt.show()

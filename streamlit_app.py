@@ -1,151 +1,453 @@
 import streamlit as st
 import pandas as pd
-import math
-from pathlib import Path
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import xgboost as xgb
+from sklearn.metrics import mean_absolute_percentage_error
+from sklearn.feature_selection import RFECV
+from sklearn.model_selection import TimeSeriesSplit
+import optuna
+import time  # プログレスバー用
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# Streamlit アプリのタイトル
+st.title("📊 時系列予測")
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# データのセッション状態を初期化（初回起動時）
+if "df" not in st.session_state:
+    st.session_state["df"] = None
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# サイドバーにフェーズ選択のセレクトボックスを追加
+phase = st.sidebar.selectbox("フェーズを選択してください", ["1.データのアップロード", "2.データ型の変更", "3.分析"])
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+if phase == "1.データのアップロード":
+    st.write("### データのアップロード")
+    uploaded_file = st.file_uploader("ファイルをアップロード", type=["csv", "xlsx", "txt", "json"])
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+    if uploaded_file is not None:
+        file_extension = uploaded_file.name.split(".")[-1]
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+        try:
+            if file_extension == "csv":
+                df = pd.read_csv(uploaded_file, encoding="utf-8-sig")
+            elif file_extension == "xlsx":
+                xls = pd.ExcelFile(uploaded_file)
+                sheet_name = st.selectbox("シートを選択してください", xls.sheet_names)
+                df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
+            elif file_extension == "txt":
+                delimiter = st.selectbox("区切り文字を選択してください", ["\t", " "])
+                df = pd.read_csv(uploaded_file, delimiter=delimiter, encoding="utf-8-sig")
+            elif file_extension == "json":
+                df = pd.read_json(uploaded_file)
+            else:
+                st.error("対応していないファイル形式です。")
+                st.stop()
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+            # 読み込んだデータをセッションに保存
+            st.session_state["df"] = df
+            st.success("✅ データの読み込み成功！")
+        except Exception as e:
+            st.error(f"❌ データの読み込みに失敗しました: {e}")
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+elif phase == "2.データ型の変更":
+    st.subheader("データ型の変更")
+    st.write("基本的には無視してください")
+    df = st.session_state.get("df")
 
-    return gdp_df
+    if df is not None:
+        for column in df.columns:
+            dtype = st.selectbox(f"{column} のデータ型を選択してください", ["自動検出", "整数", "浮動小数点数", "文字列", "日付", "バイナリ"], key=column)
+            if dtype == "整数":
+                df[column] = pd.to_numeric(df[column], errors="coerce").astype("Int64")
+            elif dtype == "浮動小数点数":
+                df[column] = pd.to_numeric(df[column], errors="coerce")
+            elif dtype == "文字列":
+                df[column] = df[column].astype(str)
+            elif dtype == "日付":
+                df[column] = pd.to_datetime(df[column], errors="coerce")
+            elif dtype == "バイナリ":
+                df[column] = df[column].astype("bool")
 
-gdp_df = get_gdp_data()
+        # 変更後のデータをセッションに保存
+        st.session_state["df"] = df
+    else:
+        st.warning("⚠️ データが読み込まれていません。まずは1でデータをアップロードしてください。")
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+elif phase == "3.分析":
+    df = st.session_state.get("df")
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+    if df is not None:
+        numerical_df = df.select_dtypes(include=["number"])
+        if not numerical_df.empty:
+            selected_variable = st.selectbox("📌 相関を調べる変数を選択", numerical_df.columns.tolist())
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
+            if selected_variable:
+                correlation_matrix = numerical_df.corr()
+                correlation_series = correlation_matrix[selected_variable].drop(selected_variable).sort_values(ascending=False)
+                top_positive = correlation_series.head(5)
+                top_negative = correlation_series.tail(5)
 
-# Add some spacing
-''
-''
+                st.subheader(f"📊 {selected_variable} と相関が高い・低い変数")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write("🔵 **正の相関が高い5つ**")
+                    st.dataframe(top_positive)
+                with col2:
+                    st.write("🔴 **負の相関が高い5つ**")
+                    st.dataframe(top_negative)
 
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
+                # 可視化
+                fig, ax = plt.subplots(figsize=(10, 5))
+                colors = ["blue"] * 5 + ["red"] * 5
+                top_features = pd.concat([top_positive, top_negative])
+                ax.barh(top_features.index[::-1], top_features.values[::-1], color=colors[::-1])
+                ax.set_xlabel("Correlation Coefficient")
+                ax.set_title(f"Top 5 Positive & Negative Correlations with {selected_variable}")
+                ax.axvline(x=0, color="black", linewidth=1)
+                st.pyplot(fig)
 
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
+        if "yyyymmdd" in df.columns:
+            df["yyyymmdd"] = pd.to_datetime(df["yyyymmdd"], errors="coerce")
+            df = df.dropna(subset=["yyyymmdd"])
+            min_date, max_date = df["yyyymmdd"].min(), df["yyyymmdd"].max()
 
-countries = gdp_df['Country Code'].unique()
+            st.subheader("📈 時系列予測")
 
-if not len(countries):
-    st.warning("Select at least one country")
+            train_start, train_end = st.date_input("📅 トレーニングデータの期間", value=(min_date, max_date - pd.DateOffset(months=1)), min_value=min_date, max_value=max_date)
+            test_start, test_end = st.date_input("📅 テストデータの期間", value=(max_date - pd.DateOffset(months=1), max_date), min_value=min_date, max_value=max_date)
 
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
+            df_train = df[(df["yyyymmdd"] >= pd.to_datetime(train_start)) & (df["yyyymmdd"] <= pd.to_datetime(train_end))].copy()
+            df_test = df[(df["yyyymmdd"] >= pd.to_datetime(test_start)) & (df["yyyymmdd"] <= pd.to_datetime(test_end))].copy()
 
-''
-''
-''
+            selected_variable = st.selectbox("📌 予測する変数を選択", df_train.select_dtypes(include=["number"]).columns.tolist())
+            frequency = st.selectbox("データの頻度を選択してください", ["日次", "月次", "年次"])
+            freq_map = {"日次": "D", "月次": "M", "年次": "Y"}
+            freq = freq_map.get(frequency, None)
+            # 📌 プログレスバー設定
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            # データの頻度に応じた特徴量を作成する関数
+            def create_time_features(df, selected_variable=None, freq=None):
+                """日次、月次または年次データの特徴量を作成"""
+                df["year"] = df["yyyymmdd"].dt.year
+                if freq == "D":  # 日次データ
+                    df["month"] = df["yyyymmdd"].dt.month
+                    df["day"] = df["yyyymmdd"].dt.day
+                    df["dayofweek"] = df["yyyymmdd"].dt.dayofweek
+                    if selected_variable is not None and selected_variable in df.columns:
+                        df["lag_1"] = df[selected_variable].shift(1)
+                        df["lag_7"] = df[selected_variable].shift(7)
+                        df["ma_7"] = df[selected_variable].rolling(window=7).mean()
+                        df["ma_30"] = df[selected_variable].rolling(window=30).mean()
+                elif freq == "M":  # 月次データ
+                    df["month"] = df["yyyymmdd"].dt.month
+                    df["quarter"] = df["yyyymmdd"].dt.quarter
+                    if selected_variable is not None and selected_variable in df.columns:
+                        df["lag_1"] = df[selected_variable].shift(1)
+                        df["lag_3"] = df[selected_variable].shift(3)
+                        df["lag_6"] = df[selected_variable].shift(6)
+                        df["lag_12"] = df[selected_variable].shift(12)
+                        df["ma_3"] = df[selected_variable].rolling(window=3).mean()
+                        df["ma_6"] = df[selected_variable].rolling(window=6).mean()
+                        df["ma_12"] = df[selected_variable].rolling(window=12).mean()
+                        df["yoy_change"] = df[selected_variable] / df["lag_12"] - 1  # 前年同月比
+                elif freq == "Y":  # 年次データ
+                    if selected_variable is not None and selected_variable in df.columns:
+                        df["lag_1"] = df[selected_variable].shift(1)
+                        df["lag_2"] = df[selected_variable].shift(2)
+                        df["lag_5"] = df[selected_variable].shift(5)
+                        df["lag_10"] = df[selected_variable].shift(10)
+                        df["ma_2"] = df[selected_variable].rolling(window=2).mean()
+                        df["ma_5"] = df[selected_variable].rolling(window=5).mean()
+                        df["ma_10"] = df[selected_variable].rolling(window=10).mean()
+                        df["growth_rate"] = df[selected_variable] / df["lag_1"] - 1  # 前年比
+                return df.dropna()
 
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
+            # 特徴量を作成
+            df_train = create_time_features(df_train.copy(), selected_variable, freq)
+            df_test = create_time_features(df_test.copy(), selected_variable, freq)
+            # カテゴリカル変数のOne-Hotエンコーディング
+            df_train = pd.get_dummies(df_train)
+            df_test = pd.get_dummies(df_test)
+            # 特徴量とラベルの定義（数値データのみを使用）
+            X_train = df_train.select_dtypes(include=[np.number]).drop(columns=[selected_variable])
+            y_train = df_train[selected_variable]
+            X_test = df_test.select_dtypes(include=[np.number]).drop(columns=[selected_variable])
+            y_test = df_test[selected_variable]
+            # 欠損値を除去
+            X_train = X_train.dropna()
+            y_train = y_train.loc[X_train.index]  # X_trainのインデックスに対応させる
+            X_test = X_test.dropna()
+            y_test = y_test.loc[X_test.index]
+            # 特徴量選択 (RFECV)
+            rfecv = RFECV(
+                estimator=xgb.XGBRegressor(random_state=100),
+                min_features_to_select=5,
+                step=1,
+                scoring="neg_mean_absolute_percentage_error"
+            )
+            rfecv.fit(X_train, y_train)
+            selected_features = X_train.columns[rfecv.support_].tolist()
+            st.write("選択された特徴量:", selected_features)
+            # 特徴量選択後のデータ
+            X_train = X_train[selected_features]
+            X_test = X_test[selected_features]
+            # ハイパーパラメータチューニング（Optuna）
+            def objective(trial):
+                params = {
+                    'n_estimators': trial.suggest_int('n_estimators', 50, 500),
+                    'max_depth': trial.suggest_int('max_depth', 2, 10),
+                    'learning_rate': trial.suggest_loguniform('learning_rate', 0.01, 0.3),
+                    'subsample': trial.suggest_uniform('subsample', 0.5, 1.0),
+                    'colsample_bytree': trial.suggest_uniform('colsample_bytree', 0.5, 1.0),
+                    'gamma': trial.suggest_float('gamma', 0, 5),
+                    'reg_alpha': trial.suggest_float('reg_alpha', 0, 5),
+                    'reg_lambda': trial.suggest_float('reg_lambda', 0, 5),
+                    'random_state': 100
+                }
+                model = xgb.XGBRegressor(**params)
+                model.fit(X_train, y_train)
+                y_pred = model.predict(X_test)
+                return mean_absolute_percentage_error(y_test, y_pred)
+            study = optuna.create_study(direction='minimize')
+            study.optimize(objective, n_trials=50)
+            # 最適ハイパーパラメータでモデル再学習
+            best_params = study.best_params
+            st.write("最適なハイパーパラメータ:", best_params)
+            model = xgb.XGBRegressor(**best_params)
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
 
-st.header('GDP over time', divider='gray')
+            # 不適切なデータ型の列を削除または変換
+            def preprocess_features(df):
+                """
+                XGBoost モデルに適したデータ型に変換する関数。
+                datetime64[ns] 型や object 型の列を削除またはエンコーディングします。
+                """
+                # datetime 型の列を削除または数値に変換
+                if "yyyymmdd" in df.columns:
+                    df["year"] = df["yyyymmdd"].dt.year
+                    df["month"] = df["yyyymmdd"].dt.month
+                    df["day"] = df["yyyymmdd"].dt.day
+                    df["dayofweek"] = df["yyyymmdd"].dt.dayofweek
+                    df = df.drop(columns=["yyyymmdd"])  # 元の日付列を削除
 
-''
+                # object 型の列を category 型に変換
+                for col in df.select_dtypes(include=["object"]).columns:
+                    df[col] = df[col].astype("category").cat.codes  # カテゴリカルデータを数値に変換
 
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
+                return df
 
-''
-''
+            # 特徴量を前処理
+            X_train = preprocess_features(X_train)
+            X_test = preprocess_features(X_test)
+
+            # モデルの学習
+            model = xgb.XGBRegressor(**best_params)
+            model.fit(X_train, y_train)
+            y_train_pred = train_pred = model.predict(X_train)
+
+            # テストデータで予測
+            y_pred = model.predict(X_test)
+
+            # データの頻度に基づいてデフォルトの予測期間を設定
+            freq_map = {"日次": "D", "月次": "M", "年次": "Y"}
+            freq = freq_map.get(frequency, None)
+
+            # デフォルトの予測期間を設定
+            default_future_periods = {"D": 30, "M": 12, "Y": 5}  # 日次: 30日, 月次: 12ヶ月, 年次: 5年
+            future_periods = default_future_periods.get(freq, 12)  # デフォルトは月次の12ヶ月
+
+            # 特徴量の整合性を確保する関数
+            def align_features(X_train, X_future):
+                """
+                学習データと予測データの特徴量を揃える関数。
+                """
+                # 学習データに存在しない列を予測データから削除
+                X_future = X_future[X_train.columns.intersection(X_future.columns)]
+
+                # 学習データに存在するが予測データにない列を追加（値は0で埋める）
+                for col in X_train.columns:
+                    if col not in X_future.columns:
+                        X_future[col] = 0
 
 
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
+                return X_future
+            future_dates = pd.date_range(start=df_test["yyyymmdd"].max() + pd.DateOffset(days=1), periods=future_periods, freq=freq)
 
-st.header(f'GDP in {to_year}', divider='gray')
+            # future_df の作成
+            future_df = pd.DataFrame({"yyyymmdd": pd.to_datetime(future_dates)})
+            future_df[selected_variable] = np.nan  # 必要であれば追加
+            
+            # --- 初期予測結果を設定 ---
+            y_train_pred_update = y_train_pred.copy()
+            test_pred = y_train_pred_update[-future_periods:]
+            st.subheader("📈 予測結果")
+            st.write(pd.DataFrame({
+                "yyyymmdd": future_dates,
+                "Predicted": test_pred
+            }))
 
-''
+            # future_dates と test_pred の長さを確認
+            if len(future_dates) != len(test_pred):
+                st.error(f"データの長さが一致しません: future_dates({len(future_dates)}), test_pred({len(test_pred)})")
+            else:
+                # データフレームを作成
+                st.write(pd.DataFrame({"yyyymmdd": future_dates, "Predicted": test_pred}))
 
-cols = st.columns(4)
 
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
 
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
+            X_train_new = X_train.iloc[355:]
+            y_train_new = y_train.iloc[355:]
+            X_train_new = preprocess_features(X_train_new)
+            X_train_new.head()
+            model.fit(X_train_new, y_train_new)
+            train_pred = model.predict(X_train_new)
 
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
+            # 日付を数値に変換（例: 年月日を整数に変換）
+            if "yyyymmdd" in future_df.columns:
+                future_df["yyyymmdd"] = future_df["yyyymmdd"].apply(lambda x: x.toordinal())
 
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+            # 最終特徴量リストを指定
+            X_train_pred = train_pred.drop(selected_variable, axis=1)
+            y_train_pred = train_pred[selected_variable]
+            X_test_pred = test_pred.drop(selected_variable, axis=1)
+            y_test_pred = test_pred[selected_variable]
+
+            X_train_pred_new = X_train_pred[selected_features]
+            X_test_pred_new = X_test_pred[selected_features]
+
+            # モデルの学習
+            model.fit(X_train_pred_new, y_train_pred)
+
+             # y_train_pred をコピーして更新用に使う
+            y_train_pred_update = y_train_pred.copy()
+
+
+
+            # 予測ループ（X_test_pred_newの行数分だけ予測を繰り返す）
+            for i in range(len(y_test_pred)):
+                # 1ステップ予測
+                X_value_pred = X_test_pred_new.iloc[i:(i+1), :]
+                y_value_pred = model.predict(X_value_pred)
+                y_value_pred = pd.Series(y_value_pred, index=[X_value_pred.index[0]])
+
+                # 予測結果を累積
+                y_train_pred_update = pd.concat([y_train_pred_update, y_value_pred])
+
+                # 特徴量の更新（最新の y_train_pred_update をもとに計算）
+                lag1_cancel_user_new = y_train_pred_update.iloc[-1]
+                _12week_lag7_moving_avg_new = np.mean([y_train_pred_update.iloc[-7 * j] for j in range(1, 13)])  # -7, -14, ..., -84
+                _14days_fibonacci_retracement_236upper_new = y_train_pred_update.iloc[-14:].max() - (
+                    y_train_pred_update.iloc[-14:].max() - y_train_pred_update.iloc[-14:].min()
+                ) * 0.236
+                macd_short_new = np.log10(abs(y_train_pred_update) + 1.0).ewm(span=7).mean().iloc[-1] - np.log10(
+                    abs(y_train_pred_update) + 1.0
+                ).ewm(span=30).mean().iloc[-1]
+                _8week_lag7_moving_avg_new = np.mean([y_train_pred_update.iloc[-7 * j] for j in range(1, 9)])  # -7, -14, ..., -56
+                _7days_moving_sum_new = y_train_pred_update.iloc[-7:].sum()
+                _14days_fibonacci_retracement_236under_new = y_train_pred_update.iloc[-14:].min() + (
+                    y_train_pred_update.iloc[-14:].max() - y_train_pred_update.iloc[-14:].min()
+                ) * 0.236
+
+                # 特徴量を X_test_pred_new の次の行に反映
+                if (i + 1) < len(X_test_pred_new):
+                    X_test_pred_new.iloc[i + 1, X_test_pred_new.columns.get_loc("lag1_cancel_user")] = lag1_cancel_user_new
+                    X_test_pred_new.iloc[i + 1, X_test_pred_new.columns.get_loc("_12week_lag7_moving_avg")] = _12week_lag7_moving_avg_new
+                    X_test_pred_new.iloc[i + 1, X_test_pred_new.columns.get_loc("_14days_fibonacci_retracement_236upper")] = _14days_fibonacci_retracement_236upper_new
+                    X_test_pred_new.iloc[i + 1, X_test_pred_new.columns.get_loc("macd_short")] = macd_short_new
+                    X_test_pred_new.iloc[i + 1, X_test_pred_new.columns.get_loc("_8week_lag7_moving_avg")] = _8week_lag7_moving_avg_new
+                    X_test_pred_new.iloc[i + 1, X_test_pred_new.columns.get_loc("_7days_moving_sum")] = _7days_moving_sum_new
+                    X_test_pred_new.iloc[i + 1, X_test_pred_new.columns.get_loc("_14days_fibonacci_retracement_236under")] = _14days_fibonacci_retracement_236under_new
+
+            # 最終予測結果（直近35個）
+            forecast = y_train_pred_update[-35:]
+
+            # 結果確認
+            print(forecast)
+
+            st.subheader("📈 予測結果")
+            st.write(pd.DataFrame({
+                "yyyymmdd": future_dates,
+                "Predicted": forecast.values
+            }))
+
+            # future_dates と forecast の長さを確認
+            if len(future_dates) != len(forecast):
+                st.error(f"データの長さが一致しません: future_dates({len(future_dates)}), forecast({len(forecast)})")
+            else:
+                # データフレームを作成
+                st.write(pd.DataFrame({"yyyymmdd": future_dates, "Predicted": forecast}))
+
+            # 表示
+            st.subheader("📈 予測結果")
+            st.write(pd.DataFrame({"yyyymmdd": future_dates, "Predicted": forecast}))
+
+            # グラフの描画
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(future_dates, forecast, label="Forecast", marker="x")
+            plt.xticks(rotation=45)
+            plt.legend()
+            st.pyplot(fig)
+
+            # CSVダウンロードボタンを追加
+            st.download_button(
+                label="📥 予測結果をダウンロード",
+                data=pd.DataFrame({"yyyymmdd": future_dates, "Predicted": forecast}).to_csv(index=False).encode("utf-8"),
+                file_name="forecast_results.csv",
+                mime="text/csv",
+            )
+
+            # 予測結果を表示
+            st.subheader(f"📈 {selected_variable} のテストデータ期間の予実プロット")
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(df_test["yyyymmdd"], y_test, label="Actual", marker="o")
+            ax.plot(df_test["yyyymmdd"], y_pred, label="Predicted", marker="x")
+            plt.xticks(rotation=45)
+            plt.legend()
+            st.pyplot(fig)
+
+            # MAPE の計算
+            mape = mean_absolute_percentage_error(y_test, y_pred)
+            st.write(f"✅ **MAPE**: {mape:.2f} %")
+            # MAPE に基づくメッセージの表示
+            if mape <= 8.5:
+                st.success("✅ モデル精度は問題ありません。以下ボタンより予測結果をダウンロードください。")
+                df_result = df_test[["yyyymmdd"]].copy()
+                df_result["Actual"] = y_test.values
+                df_result["Predicted"] = y_pred
+                csv = df_result.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    label="📥 予測結果をダウンロード",
+                    data=csv,
+                    file_name="prediction_results.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.error("⚠️ モデル精度が不足しています。データを見直してください。")
+
+
+# サイドバーにボタンを設置
+# セッション状態の初期化
+if "show_qa" not in st.session_state:
+    st.session_state["show_qa"] = False  # 初期値を False に設定
+
+with st.sidebar:
+    if st.button("Q&A"):
+        st.session_state["show_qa"] = not st.session_state["show_qa"]
+
+    # Q&Aセクションを表示（ボタンが押されたときだけ）
+    if st.session_state["show_qa"]:
+        st.write("### よくある質問")
+        st.write("**Q1: アップロードデータの期間の目安は？**")
+        st.write("A1: 月次データの場合最低でも 3年分、年次データの場合は最低でも 20年分を推奨します。")
+        
+        st.write("**Q2: パスワードを忘れた場合は？**")
+        st.write("A2: パスワードを忘れた場合は、ログインページの「パスワードを忘れた」リンクから再設定できます。")
+        
+        st.write("**Q3: お問い合わせ方法は？**")
+        st.write("A3: 操作方法がわからない、正しく操作しているはずなのにエラーが出る、モデル精度がどうしても出ないなど、質問・ご相談がある方は以下連絡先に状況をご連絡ください。担当者より返信させていただきます。<br>問い合わせ先メールアドレス：contact@b-mystory.com<br>担当：作田、野本", unsafe_allow_html=True)
+
+
