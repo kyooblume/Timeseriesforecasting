@@ -311,10 +311,17 @@ elif phase == "3.分析":
                 future_df["yyyymmdd"] = future_df["yyyymmdd"].apply(lambda x: x.toordinal())
 
             # 最終特徴量リストを指定
-            X_train_pred = train_pred.drop(selected_variable, axis=1)
-            y_train_pred = train_pred[selected_variable]
-            X_test_pred = test_pred.drop(selected_variable, axis=1)
-            y_test_pred = test_pred[selected_variable]
+# train_pred, test_pred が numpy.ndarray の場合は、まず DataFrame に変換
+# selected_features + [selected_variable] は train_pred に対応する全列名のリスト
+            train_pred_df = pd.DataFrame(train_pred, columns=selected_features + [selected_variable])
+            test_pred_df = pd.DataFrame(test_pred, columns=selected_features + [selected_variable])
+
+# ターゲット変数と特徴量を分ける
+            X_train_pred = train_pred_df.drop(columns=[selected_variable])
+            y_train_pred = train_pred_df[selected_variable]
+
+            X_test_pred = test_pred_df.drop(columns=[selected_variable])
+            y_test_pred = test_pred_df[selected_variable]
 
             X_train_pred_new = X_train_pred[selected_features]
             X_test_pred_new = X_test_pred[selected_features]
