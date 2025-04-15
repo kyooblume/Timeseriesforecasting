@@ -1,0 +1,329 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import xgboost as xgb
+from sklearn.metrics import mean_absolute_percentage_error
+from sklearn.feature_selection import RFECV
+from sklearn.model_selection import TimeSeriesSplit
+import optuna
+
+# Streamlit アプリのタイトル
+st.title("📊 時系列予測")
+
+# データのセッション状態を初期化（初回起動時）
+if "df" not in st.session_state:
+    st.session_state["df"] = None
+
+# サイドバーにフェーズ選択のセレクトボックスを追加
+phase = st.sidebar.selectbox("フェーズを選択してください", ["1.データのアップロード", "2.データ型の変更", "3.分析"])
+
+if phase == "1.データのアップロード":
+    st.write("### データのアップロード")
+    uploaded_file = st.file_uploader("ファイルをアップロード", type=["csv", "xlsx", "txt", "json"])
+
+    if uploaded_file is not None:
+        file_extension = uploaded_file.name.split(".")[-1]
+
+        try:
+            if file_extension == "csv":
+                df = pd.read_csv(uploaded_file, encoding="utf-8-sig")
+            elif file_extension == "xlsx":
+                xls = pd.ExcelFile(uploaded_file)
+                sheet_name = st.selectbox("シートを選択してください", xls.sheet_names)
+                df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
+            elif file_extension == "txt":
+                delimiter = st.selectbox("区切り文字を選択してください", ["\t", " "])
+                df = pd.read_csv(uploaded_file, delimiter=delimiter, encoding="utf-8-sig")
+            elif file_extension == "json":
+                df = pd.read_json(uploaded_file)
+            else:
+                st.error("対応していないファイル形式です。")
+                st.stop()
+
+            # 読み込んだデータをセッションに保存
+            st.session_state["df"] = df
+            st.success("✅ データの読み込み成功！")
+        except Exception as e:
+            st.error(f"❌ データの読み込みに失敗しました: {e}")
+
+elif phase == "2.データ型の変更":
+    st.subheader("データ型の変更")
+    st.write("基本的には無視してください")
+    df = st.session_state.get("df")
+
+    if df is not None:
+        for column in df.columns:
+            dtype = st.selectbox(f"{column} のデータ型を選択してください", ["自動検出", "整数", "浮動小数点数", "文字列", "日付", "バイナリ"], key=column)
+            if dtype == "整数":
+                df[column] = pd.to_numeric(df[column], errors="coerce").astype("Int64")
+            elif dtype == "浮動小数点数":
+                df[column] = pd.to_numeric(df[column], errors="coerce")
+            elif dtype == "文字列":
+                df[column] = df[column].astype(str)
+            elif dtype == "日付":
+                df[column] = pd.to_datetime(df[column], errors="coerce")
+            elif dtype == "バイナリ":
+                df[column] = df[column].astype("bool")
+
+        # 変更後のデータをセッションに保存
+        st.session_state["df"] = df
+    else:
+        st.warning("⚠️ データが読み込まれていません。まずは1でデータをアップロードしてください。")
+
+elif phase == "3.分析":
+    df = st.session_state.get("df")
+
+    if df is not None:
+        numerical_df = df.select_dtypes(include=["number"])
+        if not numerical_df.empty:
+            selected_variable = st.selectbox("📌 相関を調べる変数を選択", numerical_df.columns.tolist())
+
+            if selected_variable:
+                correlation_matrix = numerical_df.corr()
+                correlation_series = correlation_matrix[selected_variable].drop(selected_variable).sort_values(ascending=False)
+                top_positive = correlation_series.head(5)
+                top_negative = correlation_series.tail(5)
+
+                st.subheader(f"📊 {selected_variable} と相関が高い・低い変数")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write("🔵 **正の相関が高い5つ**")
+                    st.dataframe(top_positive)
+                with col2:
+                    st.write("🔴 **負の相関が高い5つ**")
+                    st.dataframe(top_negative)
+
+                # 可視化
+                fig, ax = plt.subplots(figsize=(10, 5))
+                colors = ["blue"] * 5 + ["red"] * 5
+                top_features = pd.concat([top_positive, top_negative])
+                ax.barh(top_features.index[::-1], top_features.values[::-1], color=colors[::-1])
+                ax.set_xlabel("Correlation Coefficient")
+                ax.set_title(f"Top 5 Positive & Negative Correlations with {selected_variable}")
+                ax.axvline(x=0, color="black", linewidth=1)
+                st.pyplot(fig)
+
+        if "yyyymmdd" in df.columns:
+            df["yyyymmdd"] = pd.to_datetime(df["yyyymmdd"], errors="coerce")
+            df = df.dropna(subset=["yyyymmdd"])
+            min_date, max_date = df["yyyymmdd"].min(), df["yyyymmdd"].max()
+
+            st.subheader("📈 時系列予測")
+
+            train_start, train_end = st.date_input("📅 トレーニングデータの期間", value=(min_date, max_date - pd.DateOffset(months=1)), min_value=min_date, max_value=max_date)
+            test_start, test_end = st.date_input("📅 テストデータの期間", value=(max_date - pd.DateOffset(months=1), max_date), min_value=min_date, max_value=max_date)
+            future_periods = st.number_input("予測する未来の期間（月数）", min_value=1, max_value=60, value=12)
+
+            df_train = df[(df["yyyymmdd"] >= pd.to_datetime(train_start)) & (df["yyyymmdd"] <= pd.to_datetime(train_end))].copy()
+            df_test = df[(df["yyyymmdd"] >= pd.to_datetime(test_start)) & (df["yyyymmdd"] <= pd.to_datetime(test_end))].copy()
+
+            selected_variable = st.selectbox("📌 予測する変数を選択", df_train.select_dtypes(include=["number"]).columns.tolist())
+            frequency = st.selectbox("データの頻度を選択してください", ["日次", "月次", "年次"])
+            freq_map = {"日次": "D", "月次": "M", "年次": "Y"}
+            freq = freq_map.get(frequency, None)
+
+            def create_time_features(df, selected_variable, freq):
+                """日次、月次または年次データの特徴量を作成"""
+                df["year"] = df["yyyymmdd"].dt.year
+                if freq == "D":  # 日次データ
+                    df["month"] = df["yyyymmdd"].dt.month
+                    df["day"] = df["yyyymmdd"].dt.day
+                    df["dayofweek"] = df["yyyymmdd"].dt.dayofweek
+                    df["lag_1"] = df[selected_variable].shift(1)
+                    df["lag_7"] = df[selected_variable].shift(7)
+                    df["ma_7"] = df[selected_variable].rolling(window=7).mean()
+                    df["ma_30"] = df[selected_variable].rolling(window=30).mean()
+                elif freq == "M":  # 月次データ
+                    df["month"] = df["yyyymmdd"].dt.month
+                    df["quarter"] = df["yyyymmdd"].dt.quarter
+                    df["lag_1"] = df[selected_variable].shift(1)
+                    df["lag_3"] = df[selected_variable].shift(3)
+                    df["lag_6"] = df[selected_variable].shift(6)
+                    df["lag_12"] = df[selected_variable].shift(12)
+                    df["ma_3"] = df[selected_variable].rolling(window=3).mean()
+                    df["ma_6"] = df[selected_variable].rolling(window=6).mean()
+                    df["ma_12"] = df[selected_variable].rolling(window=12).mean()
+                    df["yoy_change"] = df[selected_variable] / df["lag_12"] - 1  # 前年同月比
+                elif freq == "Y":  # 年次データ
+                    df["lag_1"] = df[selected_variable].shift(1)
+                    df["lag_2"] = df[selected_variable].shift(2)
+                    df["lag_5"] = df[selected_variable].shift(5)
+                    df["lag_10"] = df[selected_variable].shift(10)
+                    df["ma_2"] = df[selected_variable].rolling(window=2).mean()
+                    df["ma_5"] = df[selected_variable].rolling(window=5).mean()
+                    df["ma_10"] = df[selected_variable].rolling(window=10).mean()
+                    df["growth_rate"] = df[selected_variable] / df["lag_1"] - 1  # 前年比
+                return df.dropna()
+
+            # 特徴量を作成
+            df_train = create_time_features(df_train.copy(), selected_variable, freq)
+            df_test = create_time_features(df_test.copy(), selected_variable, freq)
+
+            # カテゴリカル変数のOne-Hotエンコーディング
+            df_train = pd.get_dummies(df_train)
+            df_test = pd.get_dummies(df_test)
+
+            # 特徴量とラベルの定義（数値データのみを使用）
+            X_train = df_train.select_dtypes(include=[np.number]).drop(columns=[selected_variable])
+            y_train = df_train[selected_variable]
+            X_test = df_test.select_dtypes(include=[np.number]).drop(columns=[selected_variable])
+            y_test = df_test[selected_variable]
+
+            # 欠損値を除去
+            X_train = X_train.dropna()
+            y_train = y_train.loc[X_train.index]  # X_trainのインデックスに対応させる
+
+            X_test = X_test.dropna()
+            y_test = y_test.loc[X_test.index]
+
+            # 特徴量選択 (RFECV)
+            rfecv = RFECV(
+                estimator=xgb.XGBRegressor(random_state=100),
+                min_features_to_select=5,
+                step=1,
+                scoring="neg_mean_absolute_percentage_error"
+            )
+            rfecv.fit(X_train, y_train)
+
+            selected_features = X_train.columns[rfecv.support_].tolist()
+            st.write("選択された特徴量:", selected_features)
+
+            # 特徴量選択後のデータ
+            X_train = X_train[selected_features]
+            X_test = X_test[selected_features]
+
+            # クロスバリデーションの設定
+            tscv = TimeSeriesSplit(n_splits=5)
+
+            # ハイパーパラメータチューニング（Optuna）
+            def objective(trial):
+                params = {
+                    'n_estimators': trial.suggest_int('n_estimators', 50, 500),
+                    'max_depth': trial.suggest_int('max_depth', 2, 10),
+                    'learning_rate': trial.suggest_loguniform('learning_rate', 0.01, 0.3),
+                    'subsample': trial.suggest_uniform('subsample', 0.5, 1.0),
+                    'colsample_bytree': trial.suggest_uniform('colsample_bytree', 0.5, 1.0),
+                    'gamma': trial.suggest_float('gamma', 0, 5),
+                    'reg_alpha': trial.suggest_float('reg_alpha', 0, 5),
+                    'reg_lambda': trial.suggest_float('reg_lambda', 0, 5),
+                    'random_state': 100
+                }
+
+                mape_scores = []
+
+                for train_index, val_index in tscv.split(X_train):
+                    X_train_cv, X_val_cv = X_train.iloc[train_index], X_train.iloc[val_index]
+                    y_train_cv, y_val_cv = y_train.iloc[train_index], y_train.iloc[val_index]
+
+                    model = xgb.XGBRegressor(**params)
+                    model.fit(X_train_cv, y_train_cv)
+                    y_val_pred = model.predict(X_val_cv)
+                    mape_score = mean_absolute_percentage_error(y_val_cv, y_val_pred)
+                    mape_scores.append(mape_score)
+
+                return np.mean(mape_scores)
+
+            study = optuna.create_study(direction='minimize')
+            study.optimize(objective, n_trials=50)
+
+            # 最適ハイパーパラメータでモデル再学習
+            best_params = study.best_params
+            st.write("最適なハイパーパラメータ:", best_params)
+
+            model = xgb.XGBRegressor(**best_params)
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+
+            st.subheader(f"📈 {selected_variable} のテストデータ期間の予実プロット")
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(df_test["yyyymmdd"], y_test, label="Actual", marker="o")
+            ax.plot(df_test["yyyymmdd"], y_pred, label="Predicted", marker="x")
+            plt.xticks(rotation=45)
+            plt.legend()
+            st.pyplot(fig)
+
+            # MAPE の計算
+            mape = mean_absolute_percentage_error(y_test, y_pred)
+            st.write(f"✅ **MAPE**: {mape:.2f} %")
+
+            # 未来のデータフレームを作成
+            future_dates = pd.date_range(start=max_date + pd.DateOffset(months=1), periods=future_periods, freq=freq)
+            future_df = pd.DataFrame({"yyyymmdd": future_dates})
+            future_df = create_time_features(future_df, selected_variable, freq)
+            future_df = pd.get_dummies(future_df)
+
+            # デバッグメッセージを追加
+            st.write("未来のデータフレームの行数:", len(future_df))
+            st.write("未来のデータフレームのカラム:", future_df.columns)
+
+            # 訓練データと同じ特徴量を持つように調整
+            future_df = future_df.reindex(columns=X_train.columns, fill_value=0)
+
+            # デバッグメッセージを追加
+            st.write("調整後の未来のデータフレームの行数:", len(future_df))
+            st.write("調整後の未来のデータフレームのカラム:", future_df.columns)
+
+            # 未来の予測
+            y_pred_future = model.predict(future_df)
+
+            st.subheader(f"📈 {selected_variable} の未来予測結果")
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(future_dates, y_pred_future, label="Predicted", marker="x")
+            plt.xticks(rotation=45)
+            plt.legend()
+            st.pyplot(fig)
+
+            # 予測結果のダウンロード
+            future_df["Predicted"] = y_pred_future
+            csv = future_df[["yyyymmdd", "Predicted"]].to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="📥 予測結果をダウンロード",
+                data=csv,
+                file_name="future_prediction_results.csv",
+                mime="text/csv",
+            )
+
+        else:
+            st.warning("⚠️ 'yyyymmdd' カラムが見つかりません。")
+    else:
+        st.warning("⚠️ データが読み込まれていません。まずは1でデータをアップロードしてください。")
+
+# セッションステートの初期化
+if "show_form" not in st.session_state:
+    st.session_state["show_form"] = False
+if "show_qa" not in st.session_state:
+    st.session_state["show_qa"] = False
+
+# サイドバーにボタンを設置
+with st.sidebar:
+    if st.button("Q&A"):
+        st.session_state["show_qa"] = not st.session_state["show_qa"]
+
+    if st.button("質問フォーム"):
+        st.session_state["show_form"] = not st.session_state["show_form"]
+
+    # Q&Aセクションを表示（ボタンが押されたときだけ）
+    if st.session_state["show_qa"]:
+        st.write("### よくある質問")
+        st.write("**Q1: アップロードデータの期間の目安は？**")
+        st.write("A1: 月次データの場合最低でも 3年分、年次データの場合は最低でも 20年分を推奨します。")
+        
+        st.write("**Q2: パスワードを忘れた場合は？**")
+        st.write("A2: パスワードを忘れた場合は、ログインページの「パスワードを忘れた」リンクから再設定できます。")
+        
+        st.write("**Q3: お問い合わせ方法は？**")
+        st.write("A3: 操作方法がわからない、正しく操作しているはずなのにエラーが出る、モデル精度がどうしても出ないなど、質問・ご相談がある方は以下連絡先に状況をご連絡ください。担当者より返信させていただきます。<br>問い合わせ先メールアドレス：contact@b-mystory.com<br>担当：作田、野本", unsafe_allow_html=True)
+
+    # フォームを表示（ボタンが押されたときだけ）
+    if st.session_state["show_form"]:
+        st.write("### 質問")
+        with st.form("user_form"):
+            name = st.text_input("名前")
+            email = st.text_input("メールアドレス")
+            question = st.text_area("質問内容")
+            submitted = st.form_submit_button("送信")
+
+            if submitted:
+                st.success(f"送信完了！\n名前: {name}, メール: {email}")
