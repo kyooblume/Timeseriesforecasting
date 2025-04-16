@@ -125,9 +125,8 @@ elif phase == "3.分析":
             frequency = st.selectbox("データの頻度を選択してください", ["日次", "月次", "年次"])
             freq_map = {"日次": "D", "月次": "M", "年次": "Y"}
             freq = freq_map.get(frequency, None)
-            # 📌 プログレスバー設定
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+
+
             # データの頻度に応じた特徴量を作成する関数
             def create_time_features(df, selected_variable=None, freq=None):
                 """日次、月次または年次データの特徴量を作成"""
@@ -190,7 +189,7 @@ elif phase == "3.分析":
             )
             rfecv.fit(X_train, y_train)
             selected_features = X_train.columns[rfecv.support_].tolist()
-            st.write("選択された特徴量:", selected_features)
+            st.write("選択された特徴量:", selected_features)#完成前に消す
             # 特徴量選択後のデータ
             X_train = X_train[selected_features]
             X_test = X_test[selected_features]
@@ -215,10 +214,7 @@ elif phase == "3.分析":
             study.optimize(objective, n_trials=50)
             # 最適ハイパーパラメータでモデル再学習
             best_params = study.best_params
-            st.write("最適なハイパーパラメータ:", best_params)
-            model = xgb.XGBRegressor(**best_params)
-            model.fit(X_train, y_train)
-            y_pred = model.predict(X_test)
+            st.write("最適なハイパーパラメータ:", best_params)#完成前に消す
 
             # 不適切なデータ型の列を削除または変換
             def preprocess_features(df):
@@ -227,12 +223,12 @@ elif phase == "3.分析":
                 datetime64[ns] 型や object 型の列を削除またはエンコーディングします。
                 """
                 # datetime 型の列を削除または数値に変換
-                if "yyyymmdd" in df.columns:
-                    df["year"] = df["yyyymmdd"].dt.year
-                    df["month"] = df["yyyymmdd"].dt.month
-                    df["day"] = df["yyyymmdd"].dt.day
-                    df["dayofweek"] = df["yyyymmdd"].dt.dayofweek
-                    df = df.drop(columns=["yyyymmdd"])  # 元の日付列を削除
+                #if "yyyymmdd" in df.columns:
+                    #df["year"] = df["yyyymmdd"].dt.year
+                    #df["month"] = df["yyyymmdd"].dt.month
+                    #df["day"] = df["yyyymmdd"].dt.day
+                    #df["dayofweek"] = df["yyyymmdd"].dt.dayofweek
+                    #df = df.drop(columns=["yyyymmdd"])  # 元の日付列を削除
 
                 # object 型の列を category 型に変換
                 for col in df.select_dtypes(include=["object"]).columns:
@@ -241,8 +237,8 @@ elif phase == "3.分析":
                 return df
 
             # 特徴量を前処理
-            X_train = preprocess_features(X_train)
-            X_test = preprocess_features(X_test)
+            #X_train = preprocess_features(X_train)
+            #X_test = preprocess_features(X_test)
 
             # モデルの学習
             model = xgb.XGBRegressor(**best_params)
@@ -275,48 +271,78 @@ elif phase == "3.分析":
 
 
                 return X_future
-            future_dates = pd.date_range(start=df_test["yyyymmdd"].max() + pd.DateOffset(days=1), periods=future_periods, freq=freq)
+            
+            # テストデータの最終日付を取得
+            last_date = df_test["yyyymmdd"].max()
 
+            # 頻度に基づいてオフセットを設定
+            if freq == 'D':
+                offset = pd.DateOffset(days=1)
+            elif freq == 'M':
+                offset = pd.DateOffset(months=1)
+            elif freq == 'Y':
+                offset = pd.DateOffset(years=1)
+            else:
+                raise ValueError("日次、月次、年次のいずれかを指定してください。")
+
+            # 未来の日付を生成
+            future_dates = pd.date_range(start=last_date + offset, periods=future_periods, freq=freq)
+            st.write(f"未来の日付: {future_dates}") 
             # future_df の作成
             future_df = pd.DataFrame({"yyyymmdd": pd.to_datetime(future_dates)})
-            future_df[selected_variable] = np.nan  # 必要であれば追加
-            
-            # --- 初期予測結果を設定 ---
+            st.write(f"future_df: {future_df}")  # future_df の内容を表示
+
+            # 未来データにも特徴量生成
+            future_df = create_time_features(future_df.copy(), selected_variable, freq)
+
+            # one-hot encoding（必要なら）
+            future_df = pd.get_dummies(future_df)
+            st.write(f"future_df after one-hot encoding: {future_df}")  # one-hot encoding 後の future_df を表示
+            # 予測に必要な特徴量に整形
+            X_future = future_df.select_dtypes(include=[np.number])
+            X_future = align_features(X_train, X_future)
+            X_future = X_future[X_train.columns]
+            st.write(f"X_future: {X_future}")
+
+
+
             y_train_pred_update = y_train_pred.copy()
             test_pred = y_train_pred_update[-future_periods:]
             st.subheader("📈 予測結果")
+            future_dates = [date.strftime('%Y-%m-%d') for date in future_dates]
             st.write(pd.DataFrame({
                 "yyyymmdd": future_dates,
                 "Predicted": test_pred
             }))
 
-            # future_dates と test_pred の長さを確認
-            if len(future_dates) != len(test_pred):
-                st.error(f"データの長さが一致しません: future_dates({len(future_dates)}), test_pred({len(test_pred)})")
-            else:
-                # データフレームを作成
-                st.write(pd.DataFrame({"yyyymmdd": future_dates, "Predicted": test_pred}))
-
-
-
-            X_train_new = X_train.iloc[355:]
-            y_train_new = y_train.iloc[355:]
-            X_train_new = preprocess_features(X_train_new)
-            X_train_new.head()
-            model.fit(X_train_new, y_train_new)
-            train_pred = model.predict(X_train_new)
 
             # 日付を数値に変換（例: 年月日を整数に変換）
             if "yyyymmdd" in future_df.columns:
                 future_df["yyyymmdd"] = future_df["yyyymmdd"].apply(lambda x: x.toordinal())
 
-            # 最終特徴量リストを指定
-# train_pred, test_pred が numpy.ndarray の場合は、まず DataFrame に変換
-# selected_features + [selected_variable] は train_pred に対応する全列名のリスト
-            train_pred_df = pd.DataFrame(train_pred, columns=selected_features + [selected_variable])
-            test_pred_df = pd.DataFrame(test_pred, columns=selected_features + [selected_variable])
+            # 予測結果を取得
+            train_pred = model.predict(X_train)
+            test_pred = model.predict(X_test)
 
-# ターゲット変数と特徴量を分ける
+            # 特徴量データをコピーして予測列を追加
+            train_pred_df = X_train.copy()
+            train_pred_df[selected_variable] = train_pred
+
+            test_pred_df = X_test.copy()
+            test_pred_df[selected_variable] = test_pred
+
+ 
+
+            
+            
+      
+
+
+
+
+
+
+            # ターゲット変数と特徴量を分ける
             X_train_pred = train_pred_df.drop(columns=[selected_variable])
             y_train_pred = train_pred_df[selected_variable]
 
@@ -326,8 +352,6 @@ elif phase == "3.分析":
             X_train_pred_new = X_train_pred[selected_features]
             X_test_pred_new = X_test_pred[selected_features]
 
-            # モデルの学習
-            model.fit(X_train_pred_new, y_train_pred)
 
              # y_train_pred をコピーして更新用に使う
             y_train_pred_update = y_train_pred.copy()
@@ -360,33 +384,38 @@ elif phase == "3.分析":
                 ) * 0.236
 
                 # 特徴量を X_test_pred_new の次の行に反映
-                if (i + 1) < len(X_test_pred_new):
-                    X_test_pred_new.iloc[i + 1, X_test_pred_new.columns.get_loc("lag1_cancel_user")] = lag1_cancel_user_new
-                    X_test_pred_new.iloc[i + 1, X_test_pred_new.columns.get_loc("_12week_lag7_moving_avg")] = _12week_lag7_moving_avg_new
-                    X_test_pred_new.iloc[i + 1, X_test_pred_new.columns.get_loc("_14days_fibonacci_retracement_236upper")] = _14days_fibonacci_retracement_236upper_new
-                    X_test_pred_new.iloc[i + 1, X_test_pred_new.columns.get_loc("macd_short")] = macd_short_new
-                    X_test_pred_new.iloc[i + 1, X_test_pred_new.columns.get_loc("_8week_lag7_moving_avg")] = _8week_lag7_moving_avg_new
-                    X_test_pred_new.iloc[i + 1, X_test_pred_new.columns.get_loc("_7days_moving_sum")] = _7days_moving_sum_new
-                    X_test_pred_new.iloc[i + 1, X_test_pred_new.columns.get_loc("_14days_fibonacci_retracement_236under")] = _14days_fibonacci_retracement_236under_new
+                # 特徴量の更新
+                for feature, new_value in zip(
+                    selected_features,
+                    [
+                        lag1_cancel_user_new,
+                        _12week_lag7_moving_avg_new,
+                        _14days_fibonacci_retracement_236upper_new,
+                        macd_short_new,
+                        _8week_lag7_moving_avg_new,
+                        _7days_moving_sum_new,
+                        _14days_fibonacci_retracement_236under_new
+                    ]
+                ):
+                    if (i + 1) < len(X_test_pred_new) and feature in X_test_pred_new.columns:
+                        X_test_pred_new.iloc[i + 1, X_test_pred_new.columns.get_loc(feature)] = new_value
+                # 最終予測結果（直近35個）
+                forecast = y_train_pred_update[-30:]
 
-            # 最終予測結果（直近35個）
-            forecast = y_train_pred_update[-35:]
+                print(forecast)
+                df["yyyymmdd"] = pd.to_datetime(df["yyyymmdd"]).dt.normalize()
+                test_start = pd.to_datetime(test_start).normalize()
+                test_end = pd.to_datetime(test_end).normalize()
 
-            # 結果確認
-            print(forecast)
+                st.subheader("📈 予測結果")
+                st.write(pd.DataFrame({
+                    "yyyymmdd": future_dates,
+                    "Predicted": forecast.values
+                }))
 
-            st.subheader("📈 予測結果")
-            st.write(pd.DataFrame({
-                "yyyymmdd": future_dates,
-                "Predicted": forecast.values
-            }))
+                st.write(f"future_dates: {len(future_dates)} 件")
+                st.write(f"y_pred_future: {len(forecast.values)} 件")
 
-            # future_dates と forecast の長さを確認
-            if len(future_dates) != len(forecast):
-                st.error(f"データの長さが一致しません: future_dates({len(future_dates)}), forecast({len(forecast)})")
-            else:
-                # データフレームを作成
-                st.write(pd.DataFrame({"yyyymmdd": future_dates, "Predicted": forecast}))
 
             # 表示
             st.subheader("📈 予測結果")
@@ -415,6 +444,18 @@ elif phase == "3.分析":
             plt.xticks(rotation=45)
             plt.legend()
             st.pyplot(fig)
+            st.write(f"テストデータの日数: {len(df_test)}")
+            st.write("📅 test_start:", test_start)
+            st.write("📅 test_end:", test_end)
+            st.write("🧪 df_test の行数:", len(df_test))
+            st.write(df_test.head())
+            filtered = df[(df["yyyymmdd"] >= test_start) & (df["yyyymmdd"] <= test_end)]
+            st.write("🔍 フィルタ結果", filtered)
+
+
+
+
+
 
             # MAPE の計算
             mape = mean_absolute_percentage_error(y_test, y_pred)
@@ -451,8 +492,8 @@ with st.sidebar:
         st.write("**Q1: アップロードデータの期間の目安は？**")
         st.write("A1: 月次データの場合最低でも 3年分、年次データの場合は最低でも 20年分を推奨します。")
         
-        st.write("**Q2: パスワードを忘れた場合は？**")
-        st.write("A2: パスワードを忘れた場合は、ログインページの「パスワードを忘れた」リンクから再設定できます。")
+        st.write("**Q2: 予測期間は？**")
+        st.write("A2: 日次の場合は30日、月次の場合は12ヶ月、年次の場合は5年をデフォルトで設定しています。")
         
         st.write("**Q3: お問い合わせ方法は？**")
         st.write("A3: 操作方法がわからない、正しく操作しているはずなのにエラーが出る、モデル精度がどうしても出ないなど、質問・ご相談がある方は以下連絡先に状況をご連絡ください。担当者より返信させていただきます。<br>問い合わせ先メールアドレス：contact@b-mystory.com<br>担当：作田、野本", unsafe_allow_html=True)
