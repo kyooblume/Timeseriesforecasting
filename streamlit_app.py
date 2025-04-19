@@ -217,7 +217,7 @@ elif phase == "3.分析":
             )
             rfecv.fit(X_train, y_train)
             selected_features = X_train.columns[rfecv.support_].tolist()
-            st.write("選択された特徴量:", selected_features)#完成前に消す
+            #st.write("選択された特徴量:", selected_features)#完成前に消す
             # 特徴量選択後のデータ
             X_train = X_train[selected_features]
             X_test = X_test[selected_features]
@@ -242,7 +242,7 @@ elif phase == "3.分析":
             study.optimize(objective, n_trials=50)
             # 最適ハイパーパラメータでモデル再学習
             best_params = study.best_params
-            st.write("最適なハイパーパラメータ:", best_params)#完成前に消す
+            #st.write("最適なハイパーパラメータ:", best_params)#完成前に消す
 
             # 不適切なデータ型の列を削除または変換
             def preprocess_features(df):
@@ -315,26 +315,24 @@ elif phase == "3.分析":
 
             # 未来の日付を生成
             future_dates = pd.date_range(start=last_date + offset, periods=future_periods, freq=freq)
-            st.write(f"未来の日付: {future_dates}") 
+            #st.write(f"未来の日付: {future_dates}") 
             # future_df の作成
             future_df = pd.DataFrame({"yyyymmdd": pd.to_datetime(future_dates)})
-            st.write(f"future_df: {future_df}")  # future_df の内容を表示
+            #st.write(f"future_df: {future_df}")  # future_df の内容を表示
 
             # 未来データにも特徴量生成
             future_df = create_time_features(future_df.copy(), selected_variable, freq)
 
             # one-hot encoding
             future_df = pd.get_dummies(future_df)
-            st.write(f"future_df after one-hot encoding: {future_df}")  # one-hot encoding 後の future_df を表示
+            #st.write(f"future_df after one-hot encoding: {future_df}")  # one-hot encoding 後の future_df を表示
             # 予測に必要な特徴量に整形
             X_future = future_df.select_dtypes(include=[np.number])
             X_future = align_features(X_train, X_future)
             X_future = X_future[X_train.columns]
-            st.write(f"X_future: {X_future}")
+            #st.write(f"X_future: {X_future}")
 
 
-
-  
 
 
 
@@ -565,3 +563,5 @@ with st.sidebar:
         st.write("A3: 操作方法がわからない、正しく操作しているはずなのにエラーが出る、モデル精度がどうしても出ないなど、質問・ご相談がある方は以下連絡先に状況をご連絡ください。担当者より返信させていただきます。<br>問い合わせ先メールアドレス：contact@b-mystory.com<br>担当：作田、野本", unsafe_allow_html=True)
 
 
+        st.write("**Q4: 予測結果のダウンロードは？**")      
+        st.write("A4: 予測結果はCSV形式でダウンロードできます。")
