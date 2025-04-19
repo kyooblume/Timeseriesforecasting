@@ -74,6 +74,20 @@ elif phase == "2.データ型の変更":
         st.session_state["df"] = df
     else:
         st.warning("⚠️ データが読み込まれていません。まずは1でデータをアップロードしてください。")
+        
+    # すべての列を選択肢に出す
+    date_col_candidates = df.columns.tolist()
+
+    # ユーザーに選ばせる
+    selected_date_col = st.selectbox("📅 日付として使う列を選んでください", date_col_candidates)
+
+    # 選ばれた列を datetime に変換して yyyymmdd に統一
+    df["yyyymmdd"] = pd.to_datetime(df[selected_date_col], errors="coerce")
+    df = df.dropna(subset=["yyyymmdd"])
+
+
+
+
 
 elif phase == "3.分析":
     df = st.session_state.get("df")
@@ -163,6 +177,20 @@ elif phase == "3.分析":
                         df["ma_10"] = df[selected_variable].rolling(window=10).mean()
                         df["growth_rate"] = df[selected_variable] / df["lag_1"] - 1  # 前年比
                 return df.dropna()
+            
+
+
+
+
+
+
+
+
+
+
+
+
+
 
             # 特徴量を作成
             df_train = create_time_features(df_train.copy(), selected_variable, freq)
@@ -295,7 +323,7 @@ elif phase == "3.分析":
             # 未来データにも特徴量生成
             future_df = create_time_features(future_df.copy(), selected_variable, freq)
 
-            # one-hot encoding（必要なら）
+            # one-hot encoding
             future_df = pd.get_dummies(future_df)
             st.write(f"future_df after one-hot encoding: {future_df}")  # one-hot encoding 後の future_df を表示
             # 予測に必要な特徴量に整形
@@ -303,6 +331,20 @@ elif phase == "3.分析":
             X_future = align_features(X_train, X_future)
             X_future = X_future[X_train.columns]
             st.write(f"X_future: {X_future}")
+
+
+
+  
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -353,88 +395,91 @@ elif phase == "3.分析":
             X_test_pred_new = X_test_pred[selected_features]
 
 
-             # y_train_pred をコピーして更新用に使う
-            y_train_pred_update = y_train_pred.copy()
 
+            y_train_pred_update = y_train.copy()
+            pred_cache = {}  # 日付ごとの予測結果を保存
 
-
-            # 予測ループ（X_test_pred_newの行数分だけ予測を繰り返す）
             for i in range(len(y_test_pred)):
-                # 1ステップ予測
+                date = X_test_pred_new.index[i]
                 X_value_pred = X_test_pred_new.iloc[i:(i+1), :]
-                y_value_pred = model.predict(X_value_pred)
-                y_value_pred = pd.Series(y_value_pred, index=[X_value_pred.index[0]])
+
+                # すでに予測していたら再利用、なければ新しく予測して保存
+                if date in pred_cache:
+                    y_value_pred = pred_cache[date]
+                else:
+                    pred_value = model.predict(X_value_pred)
+                    y_value_pred = pd.Series(pred_value, index=[date])
+                    pred_cache[date] = y_value_pred
 
                 # 予測結果を累積
                 y_train_pred_update = pd.concat([y_train_pred_update, y_value_pred])
 
-                # 特徴量の更新（最新の y_train_pred_update をもとに計算）
-                lag1_cancel_user_new = y_train_pred_update.iloc[-1]
-                _12week_lag7_moving_avg_new = np.mean([y_train_pred_update.iloc[-7 * j] for j in range(1, 13)])  # -7, -14, ..., -84
-                _14days_fibonacci_retracement_236upper_new = y_train_pred_update.iloc[-14:].max() - (
-                    y_train_pred_update.iloc[-14:].max() - y_train_pred_update.iloc[-14:].min()
-                ) * 0.236
-                macd_short_new = np.log10(abs(y_train_pred_update) + 1.0).ewm(span=7).mean().iloc[-1] - np.log10(
-                    abs(y_train_pred_update) + 1.0
-                ).ewm(span=30).mean().iloc[-1]
-                _8week_lag7_moving_avg_new = np.mean([y_train_pred_update.iloc[-7 * j] for j in range(1, 9)])  # -7, -14, ..., -56
-                _7days_moving_sum_new = y_train_pred_update.iloc[-7:].sum()
-                _14days_fibonacci_retracement_236under_new = y_train_pred_update.iloc[-14:].min() + (
-                    y_train_pred_update.iloc[-14:].max() - y_train_pred_update.iloc[-14:].min()
-                ) * 0.236
+                # 特徴量の更新（X_test_pred_newの次の行に反映）
+                if (i + 1) < len(X_test_pred_new):
+                    lag1_cancel_user_new = y_train_pred_update.iloc[-1]
+                    _12week_lag7_moving_avg_new = np.mean([y_train_pred_update.iloc[-7 * j] for j in range(1, 13)])
+                    _14days_fibonacci_retracement_236upper_new = y_train_pred_update.iloc[-14:].max() - (
+                        y_train_pred_update.iloc[-14:].max() - y_train_pred_update.iloc[-14:].min()
+                    ) * 0.236
+                    macd_short_new = np.log10(abs(y_train_pred_update) + 1.0).ewm(span=7).mean().iloc[-1] - np.log10(
+                        abs(y_train_pred_update) + 1.0).ewm(span=30).mean().iloc[-1]
+                    _8week_lag7_moving_avg_new = np.mean([y_train_pred_update.iloc[-7 * j] for j in range(1, 9)])
+                    _7days_moving_sum_new = y_train_pred_update.iloc[-7:].sum()
+                    _14days_fibonacci_retracement_236under_new = y_train_pred_update.iloc[-14:].min() + (
+                        y_train_pred_update.iloc[-14:].max() - y_train_pred_update.iloc[-14:].min()) * 0.236
 
-                # 特徴量を X_test_pred_new の次の行に反映
-                # 特徴量の更新
-                for feature, new_value in zip(
-                    selected_features,
-                    [
-                        lag1_cancel_user_new,
-                        _12week_lag7_moving_avg_new,
-                        _14days_fibonacci_retracement_236upper_new,
-                        macd_short_new,
-                        _8week_lag7_moving_avg_new,
-                        _7days_moving_sum_new,
-                        _14days_fibonacci_retracement_236under_new
-                    ]
-                ):
-                    if (i + 1) < len(X_test_pred_new) and feature in X_test_pred_new.columns:
-                        X_test_pred_new.iloc[i + 1, X_test_pred_new.columns.get_loc(feature)] = new_value
-                # 最終予測結果（直近35個）
+                    # 特徴量をX_test_pred_newの次の行に反映
+                    for feature, new_value in zip(
+                        selected_features,
+                        [
+                            lag1_cancel_user_new,
+                            _12week_lag7_moving_avg_new,
+                            _14days_fibonacci_retracement_236upper_new,
+                            macd_short_new,
+                            _8week_lag7_moving_avg_new,
+                            _7days_moving_sum_new,
+                            _14days_fibonacci_retracement_236under_new
+                        ]
+                    ):
+                        if feature in X_test_pred_new.columns:
+                            X_test_pred_new.iat[i + 1, X_test_pred_new.columns.get_loc(feature)] = new_value
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                # 最終予測結果（直近30個）
                 forecast = y_train_pred_update[-30:]
 
-                print(forecast)
+                #print(forecast)
                 df["yyyymmdd"] = pd.to_datetime(df["yyyymmdd"]).dt.normalize()
                 test_start = pd.to_datetime(test_start).normalize()
                 test_end = pd.to_datetime(test_end).normalize()
 
-                st.subheader("📈 予測結果")
-                st.write(pd.DataFrame({
-                    "yyyymmdd": future_dates,
-                    "Predicted": forecast.values
-                }))
+                #st.subheader("📈 予測結果")
+                #st.write(pd.DataFrame({
+                    #"yyyymmdd": future_dates,
+                    #"Predicted": forecast.values
+                #}))
 
-                st.write(f"future_dates: {len(future_dates)} 件")
-                st.write(f"y_pred_future: {len(forecast.values)} 件")
+                #st.write(f"future_dates: {len(future_dates)} 件")
+                #st.write(f"y_pred_future: {len(forecast.values)} 件")
 
-
-            # 表示
-            st.subheader("📈 予測結果")
-            st.write(pd.DataFrame({"yyyymmdd": future_dates, "Predicted": forecast}))
-
-            # グラフの描画
-            fig, ax = plt.subplots(figsize=(12, 6))
-            ax.plot(future_dates, forecast, label="Forecast", marker="x")
-            plt.xticks(rotation=45)
-            plt.legend()
-            st.pyplot(fig)
-
-            # CSVダウンロードボタンを追加
-            st.download_button(
-                label="📥 予測結果をダウンロード",
-                data=pd.DataFrame({"yyyymmdd": future_dates, "Predicted": forecast}).to_csv(index=False).encode("utf-8"),
-                file_name="forecast_results.csv",
-                mime="text/csv",
-            )
 
             # 予測結果を表示
             st.subheader(f"📈 {selected_variable} のテストデータ期間の予実プロット")
@@ -447,13 +492,34 @@ elif phase == "3.分析":
             st.write(f"テストデータの日数: {len(df_test)}")
             st.write("📅 test_start:", test_start)
             st.write("📅 test_end:", test_end)
-            st.write("🧪 df_test の行数:", len(df_test))
-            st.write(df_test.head())
-            filtered = df[(df["yyyymmdd"] >= test_start) & (df["yyyymmdd"] <= test_end)]
-            st.write("🔍 フィルタ結果", filtered)
 
 
 
+
+
+
+
+
+
+            # 表示
+            #st.subheader("📈 予測結果")
+            #st.write(pd.DataFrame({"yyyymmdd": future_dates, "Predicted": forecast}))
+
+            # グラフの描画
+            st.subheader(f"📈 {selected_variable} の予測プロット")
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(future_dates, forecast, label="Forecast", marker="x")
+            plt.xticks(rotation=45)
+            plt.legend()
+            st.pyplot(fig)
+
+            # CSVダウンロードボタンを追加
+            #st.download_button(
+                #label="📥 予測結果をダウンロード",
+                #data=pd.DataFrame({"yyyymmdd": future_dates, "Predicted": forecast}).to_csv(index=False).encode("utf-8"),
+                #file_name="forecast_results.csv",
+                #mime="text/csv",
+           # )
 
 
 
